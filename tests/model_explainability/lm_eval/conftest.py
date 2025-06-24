@@ -1,10 +1,7 @@
-from typing import Generator, Any
+import os
+from typing import Any, Generator
 
 import pytest
-from ocp_resources.route import Route
-from ocp_resources.secret import Secret
-from ocp_resources.service import Service
-from pytest import FixtureRequest
 from kubernetes.dynamic import DynamicClient
 from ocp_resources.config_map import ConfigMap
 from ocp_resources.deployment import Deployment
@@ -13,22 +10,54 @@ from ocp_resources.namespace import Namespace
 from ocp_resources.persistent_volume_claim import PersistentVolumeClaim
 from ocp_resources.pod import Pod
 from ocp_resources.resource import ResourceEditor
+from ocp_resources.route import Route
+from ocp_resources.secret import Secret
+from ocp_resources.service import Service
+from pytest import (
+    FixtureRequest,
+    Parser
+)
 from pytest_testconfig import py_config
 
 from tests.model_explainability.lm_eval.utils import get_lmevaljob_pod
-from utilities.constants import Labels, Timeout, Annotations, Protocols, MinIo
+from utilities.constants import Annotations, Labels, MinIo, Protocols, Timeout
 
 VLLM_EMULATOR: str = "vllm-emulator"
 VLLM_EMULATOR_PORT: int = 8000
 LMEVALJOB_NAME: str = "lmeval-test-job"
 
 
+# @pytest.fixture(scope="function")
+# def lmevaljob_hf(
+#     request: FixtureRequest,
+#     admin_client: DynamicClient,
+#     model_namespace: Namespace,
+#     patched_trustyai_operator_configmap_allow_online: ConfigMap,
+# ) -> Generator[LMEvalJob, None, None]:
+#     with LMEvalJob(
+#         client=admin_client,
+#         name=LMEVALJOB_NAME,
+#         namespace=model_namespace.name,
+#         model="hf",
+#         model_args=[{"name": "pretrained", "value": "Qwen/Qwen2.5-0.5B"}],
+#         task_list=request.param.get("task_list"),
+#         log_samples=True,
+#         allow_online=True,
+#         allow_code_execution=True,
+#         system_instruction="Be concise. At every point give the shortest acceptable answer.",
+#         chat_template={
+#             "enabled": True,
+#         },
+#         limit="0.01",
+#     ) as job:
+#         yield job
 @pytest.fixture(scope="function")
 def lmevaljob_hf(
     request: FixtureRequest,
     admin_client: DynamicClient,
     model_namespace: Namespace,
     patched_trustyai_operator_configmap_allow_online: ConfigMap,
+    lmeval_hf_access_token: Secret,
 ) -> Generator[LMEvalJob, None, None]:
     with LMEvalJob(
         client=admin_client,
@@ -45,6 +74,34 @@ def lmevaljob_hf(
             "enabled": True,
         },
         limit="0.01",
+        pod = {
+            "container": {
+                "resources": {
+                    "limits": {
+                        "cpu": "1",
+                        "memory": "8Gi",
+                        "nvidia.com/gpu": "1"
+                    },
+                    "requests": {
+                        "cpu": "1",
+                        "memory": "8Gi",
+                        "nvidia.com/gpu": "1"
+                    }
+                },
+                # TO-DO: determine whether we want to directly want to input the token value or read from secret
+                "env": [
+                    {
+                        "valueFrom": {
+                            "secretKeyRef": {
+                                "name": lmeval_hf_access_token.Name,
+                                "key": "HF_ACCESS_TOKEN",
+                            },
+                        },
+                    }
+                ],
+            },
+        },
+
     ) as job:
         yield job
 
@@ -404,3 +461,20 @@ def lmevaljob_vllm_emulator_pod(
 @pytest.fixture(scope="function")
 def lmevaljob_s3_offline_pod(admin_client: DynamicClient, lmevaljob_s3_offline: LMEvalJob) -> Generator[Pod, Any, Any]:
     yield get_lmevaljob_pod(client=admin_client, lmevaljob=lmevaljob_s3_offline)
+
+@pytest.fixture(scope="function")
+def lmeval_hf_access_token(
+    admin_client: DynamicClient,
+    model_namespace: Namespace,
+    hf_access_token: str,
+) -> Secret:
+    with Secret(
+        client=admin_client,
+        name="hf-secret",
+        namespace=model_namespace,
+        string_data={
+            "HF_ACCESS_TOKEN": hf_access_token, # TO-DO: fix error "fixture 'hf_access_token' not found"
+        },
+        wait_for_resource=True,
+    ) as secret:
+        yield secret
