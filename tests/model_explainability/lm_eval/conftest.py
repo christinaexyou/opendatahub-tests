@@ -13,10 +13,7 @@ from ocp_resources.resource import ResourceEditor
 from ocp_resources.route import Route
 from ocp_resources.secret import Secret
 from ocp_resources.service import Service
-from pytest import (
-    FixtureRequest,
-    Parser
-)
+from pytest import FixtureRequest, Config
 from pytest_testconfig import py_config
 
 from tests.model_explainability.lm_eval.utils import get_lmevaljob_pod
@@ -27,38 +24,20 @@ VLLM_EMULATOR_PORT: int = 8000
 LMEVALJOB_NAME: str = "lmeval-test-job"
 
 
-# @pytest.fixture(scope="function")
-# def lmevaljob_hf(
-#     request: FixtureRequest,
-#     admin_client: DynamicClient,
-#     model_namespace: Namespace,
-#     patched_trustyai_operator_configmap_allow_online: ConfigMap,
-# ) -> Generator[LMEvalJob, None, None]:
-#     with LMEvalJob(
-#         client=admin_client,
-#         name=LMEVALJOB_NAME,
-#         namespace=model_namespace.name,
-#         model="hf",
-#         model_args=[{"name": "pretrained", "value": "Qwen/Qwen2.5-0.5B"}],
-#         task_list=request.param.get("task_list"),
-#         log_samples=True,
-#         allow_online=True,
-#         allow_code_execution=True,
-#         system_instruction="Be concise. At every point give the shortest acceptable answer.",
-#         chat_template={
-#             "enabled": True,
-#         },
-#         limit="0.01",
-#     ) as job:
-#         yield job
 @pytest.fixture(scope="function")
 def lmevaljob_hf(
     request: FixtureRequest,
     admin_client: DynamicClient,
     model_namespace: Namespace,
     patched_trustyai_operator_configmap_allow_online: ConfigMap,
-    lmeval_hf_access_token: Secret,
+    pytestconfig: Config,
 ) -> Generator[LMEvalJob, None, None]:
+    hf_access_token=pytestconfig.option.hf_access_token
+    if not hf_access_token:
+        raise ValueError(
+            "HF access token is not set. "
+            "Either pass with `--hf-access-token` or set `HF_ACCESS_TOKEN` environment variable"
+        )
     with LMEvalJob(
         client=admin_client,
         name=LMEVALJOB_NAME,
@@ -90,14 +69,15 @@ def lmevaljob_hf(
                 },
                 # TO-DO: determine whether we want to directly want to input the token value or read from secret
                 "env": [
-                    {
-                        "valueFrom": {
-                            "secretKeyRef": {
-                                "name": lmeval_hf_access_token.Name,
-                                "key": "HF_ACCESS_TOKEN",
-                            },
-                        },
-                    }
+                     {"name": "HF_TOKEN", "value":hf_access_token},
+                    # {
+                    #     "valueFrom": {
+                    #         "secretKeyRef": {
+                    #             "name": lmeval_hf_access_token.Name,
+                    #             "key": "HF_ACCESS_TOKEN",
+                    #         },
+                    #     },
+                    # }
                 ],
             },
         },
@@ -466,8 +446,14 @@ def lmevaljob_s3_offline_pod(admin_client: DynamicClient, lmevaljob_s3_offline: 
 def lmeval_hf_access_token(
     admin_client: DynamicClient,
     model_namespace: Namespace,
-    hf_access_token: str,
+    pytestconfig: Config,
 ) -> Secret:
+    hf_access_token=pytestconfig.option.hf_access_token
+    if not hf_access_token:
+        raise ValueError(
+            "HF access token is not set. "
+            "Either pass with `--hf-access-token` or set `HF_ACCESS_TOKEN` environment variable"
+        )
     with Secret(
         client=admin_client,
         name="hf-secret",
