@@ -1,7 +1,10 @@
-import os
-from typing import Any, Generator
+from typing import Generator, Any
 
 import pytest
+from ocp_resources.route import Route
+from ocp_resources.secret import Secret
+from ocp_resources.service import Service
+from pytest import FixtureRequest
 from kubernetes.dynamic import DynamicClient
 from ocp_resources.config_map import ConfigMap
 from ocp_resources.deployment import Deployment
@@ -10,14 +13,11 @@ from ocp_resources.namespace import Namespace
 from ocp_resources.persistent_volume_claim import PersistentVolumeClaim
 from ocp_resources.pod import Pod
 from ocp_resources.resource import ResourceEditor
-from ocp_resources.route import Route
-from ocp_resources.secret import Secret
-from ocp_resources.service import Service
-from pytest import FixtureRequest, Config
 from pytest_testconfig import py_config
 
 from tests.model_explainability.lm_eval.utils import get_lmevaljob_pod
-from utilities.constants import Annotations, Labels, MinIo, Protocols, Timeout
+from utilities.constants import Labels, Timeout, Annotations, Protocols, MinIo
+from pytest import Config
 
 VLLM_EMULATOR: str = "vllm-emulator"
 VLLM_EMULATOR_PORT: int = 8000
@@ -30,14 +30,8 @@ def lmevaljob_hf(
     admin_client: DynamicClient,
     model_namespace: Namespace,
     patched_trustyai_operator_configmap_allow_online: ConfigMap,
-    pytestconfig: Config,
+    lmeval_hf_access_token: Secret,
 ) -> Generator[LMEvalJob, None, None]:
-    hf_access_token=pytestconfig.option.hf_access_token
-    if not hf_access_token:
-        raise ValueError(
-            "HF access token is not set. "
-            "Either pass with `--hf-access-token` or set `HF_ACCESS_TOKEN` environment variable"
-        )
     with LMEvalJob(
         client=admin_client,
         name=LMEVALJOB_NAME,
@@ -67,17 +61,15 @@ def lmevaljob_hf(
                         "nvidia.com/gpu": "1"
                     }
                 },
-                # TO-DO: determine whether we want to directly want to input the token value or read from secret
                 "env": [
-                     {"name": "HF_TOKEN", "value":hf_access_token},
-                    # {
-                    #     "valueFrom": {
-                    #         "secretKeyRef": {
-                    #             "name": lmeval_hf_access_token.Name,
-                    #             "key": "HF_ACCESS_TOKEN",
-                    #         },
-                    #     },
-                    # }
+                    {   "name": "HF_TOKEN",
+                        "valueFrom": {
+                            "secretKeyRef": {
+                                "name": "hf-secret",
+                                "key": "HF_ACCESS_TOKEN",
+                            },
+                        },
+                    }
                 ],
             },
         },
@@ -457,10 +449,11 @@ def lmeval_hf_access_token(
     with Secret(
         client=admin_client,
         name="hf-secret",
-        namespace=model_namespace,
+        namespace=model_namespace.name,
         string_data={
-            "HF_ACCESS_TOKEN": hf_access_token, # TO-DO: fix error "fixture 'hf_access_token' not found"
+            "HF_ACCESS_TOKEN": hf_access_token,
         },
+
         wait_for_resource=True,
     ) as secret:
         yield secret
