@@ -13,13 +13,14 @@ from ocp_resources.nemo_guardrails import NemoGuardrails
 from ocp_resources.route import Route
 from ocp_resources.secret import Secret
 
-from tests.ai_safety.nemo_guardrails.constants import PresidioEntity
+from tests.ai_safety.nemo_guardrails.constants import MCP_GATEWAY_NAME, MCP_GATEWAY_NAMESPACE, PresidioEntity
 from tests.ai_safety.nemo_guardrails.utils import (
     create_llm_judge_config,
     create_presidio_config,
     wait_for_nemo_guardrails_health,
 )
 from utilities.constants import LLMdInferenceSimConfig
+from utilities.resources.kuadrant import MCPGatewayExtension
 
 
 # ===========================
@@ -316,6 +317,54 @@ def nemo_guardrails_second_server(
 
 
 @pytest.fixture(scope="class")
+def nemo_guardrails_mcp(
+    admin_client: DynamicClient,
+    model_namespace: Namespace,
+    nemo_presidio_configmap: ConfigMap,
+    nemo_api_token_secret: Secret,
+    mcp_gateway_extension: MCPGatewayExtension,
+) -> Generator[NemoGuardrails, Any, Any]:
+    """NeMo Guardrails CR with MCP config (requires MCPGatewayExtension to exist first)."""
+    with NemoGuardrails(
+        client=admin_client,
+        name="nemo-mcp",
+        namespace=model_namespace.name,
+        annotations={
+            "security.opendatahub.io/enable-auth": "true",
+        },
+        nemo_configs=[
+            {
+                "name": "mcp",
+                "configMaps": [nemo_presidio_configmap.name],
+                "default": True,
+            }
+        ],
+        replicas=1,
+        env=[
+            {
+                "name": "OPENAI_API_KEY",
+                "valueFrom": {"secretKeyRef": {"name": nemo_api_token_secret.name, "key": "token"}},
+            }
+        ],
+        mcp_gateway=[
+            {
+                "name": MCP_GATEWAY_NAME,
+                "namespace": MCP_GATEWAY_NAMESPACE,
+            },
+        ],
+    ) as nemo_cr:
+        # Wait for the deployment to be ready
+        deployment = Deployment(
+            client=admin_client,
+            name=nemo_cr.name,
+            namespace=nemo_cr.namespace,
+            wait_for_resource=True,
+        )
+        deployment.wait_for_replicas()
+        yield nemo_cr
+
+
+@pytest.fixture(scope="class")
 def nemo_config_update_configmap(
     admin_client: DynamicClient,
     model_namespace: Namespace,
@@ -529,5 +578,62 @@ def nemo_guardrails_config_update_healthcheck(
     wait_for_nemo_guardrails_health(
         host=nemo_guardrails_config_update_route.host,
         token=None,
+        ca_bundle_file=openshift_ca_bundle_file,
+    )
+
+
+@pytest.fixture(scope="class")
+def mcp_gateway_namespace(
+    admin_client: DynamicClient,
+) -> Generator[Namespace, Any, Any]:
+    """Namespace where the MCPGatewayExtension lives."""
+    with Namespace(
+        client=admin_client,
+        name=MCP_GATEWAY_NAMESPACE,
+    ) as ns:
+        ns.wait_for_status(status=Namespace.Status.ACTIVE, timeout=60)
+        yield ns
+
+
+@pytest.fixture(scope="class")
+def mcp_gateway_extension(
+    admin_client: DynamicClient,
+    mcp_gateway_namespace: Namespace,
+) -> Generator[MCPGatewayExtension, Any, Any]:
+    """Minimal MCPGatewayExtension CR that triggers EnvoyFilter creation by the operator."""
+    with MCPGatewayExtension(
+        client=admin_client,
+        name=MCP_GATEWAY_NAME,
+        namespace=MCP_GATEWAY_NAMESPACE,
+    ) as ext:
+        yield ext
+
+
+@pytest.fixture(scope="class")
+def nemo_guardrails_mcp_route(
+    admin_client: DynamicClient,
+    model_namespace: Namespace,
+    nemo_guardrails_mcp: NemoGuardrails,
+) -> Generator[Route, Any, Any]:
+    """Route for MCP NeMo Guardrails."""
+    yield Route(
+        client=admin_client,
+        name=nemo_guardrails_mcp.name,
+        namespace=model_namespace.name,
+        wait_for_resource=True,
+    )
+
+
+@pytest.fixture(scope="class")
+def nemo_guardrails_mcp_healthcheck(
+    nemo_guardrails_mcp: NemoGuardrails,
+    nemo_guardrails_mcp_route: Route,
+    current_client_token: str,
+    openshift_ca_bundle_file: str,
+) -> None:
+    """Wait for MCP NeMo Guardrails to be healthy and serving requests."""
+    wait_for_nemo_guardrails_health(
+        host=nemo_guardrails_mcp_route.host,
+        token=current_client_token,
         ca_bundle_file=openshift_ca_bundle_file,
     )

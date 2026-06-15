@@ -13,6 +13,8 @@ from tests.ai_safety.nemo_guardrails.constants import (
     CHAT_ENDPOINT,
     CHECK_ENDPOINT,
     CLEAN_PROMPT,
+    MCP_GATEWAY_NAME,
+    MCP_GATEWAY_NAMESPACE,
     MODEL_NAME,
     PII_PROMPT,
     SAFE_PROMPTS,
@@ -21,6 +23,7 @@ from tests.ai_safety.nemo_guardrails.utils import (
     send_request,
     validate_nemo_guardrails_images,
     verify_auth_required,
+    wait_for_envoy_filter,
 )
 
 
@@ -39,6 +42,20 @@ def test_nemo_guardrails_crd_exists(
     )
 
     assert crd_resource.exists, f"CRD {crd_name} does not exist on the cluster"
+
+
+@pytest.mark.smoke
+@pytest.mark.ai_safety
+def test_mcp_gateway_extension_crd_exists(
+    admin_client: DynamicClient,
+) -> None:
+    """Verify mcpgatewayextensions CRD exists on the cluster."""
+    crd = CustomResourceDefinition(
+        client=admin_client,
+        name="mcpgatewayextensions.mcp.kuadrant.io",
+        ensure_exists=True,
+    )
+    assert crd.exists, "mcpgatewayextensions.mcp.kuadrant.io CRD is not installed"
 
 
 @pytest.mark.tier1
@@ -583,3 +600,126 @@ class TestNemoGuardrailsSecretMounting:
             assert "choices" in response_json, "Chat endpoint should contain choices"
         elif endpoint == CHECK_ENDPOINT:
             assert "status" in response_json, "Check endpoint should contain status"
+
+
+@pytest.mark.tier1
+@pytest.mark.ai_safety
+@pytest.mark.rawdeployment
+@pytest.mark.parametrize(
+    "model_namespace",
+    [pytest.param({"name": "test-nemo-guardrails"})],
+    indirect=True,
+)
+@pytest.mark.usefixtures("patched_dsc_kserve_headed")
+class TestNemoGuardrailsMCP:
+    """
+    Tests for MCP gateway configuration in NeMo Guardrails.
+
+    This test class validates:
+    1. MCP gateway reference is stored in the CR spec
+    2. CR deploys successfully and a route is created
+    3. Server can respond to requests via the MCP-configured server
+    """
+
+    def test_nemo_mcp_cr_spec(
+        self,
+        nemo_guardrails_mcp: NemoGuardrails,
+    ) -> None:
+        """
+        Verify MCP gateway is recorded in the CR spec.
+
+        Given: NeMo Guardrails CR created with mcp_gateway field
+        When: CR spec is inspected
+        Then: mcpGateway entry references the expected gateway name and namespace
+        """
+        mcp_gateways = nemo_guardrails_mcp.instance.spec.mcpGateway
+        assert mcp_gateways, "CR spec.mcpGateway should not be empty"
+
+        gateway_names = [gw["name"] for gw in mcp_gateways]
+        gateway_namespaces = [gw["namespace"] for gw in mcp_gateways]
+
+        assert MCP_GATEWAY_NAME in gateway_names, (
+            f"Expected {MCP_GATEWAY_NAME!r} in mcpGateway names, got {gateway_names}"
+        )
+        assert MCP_GATEWAY_NAMESPACE in gateway_namespaces, (
+            f"Expected {MCP_GATEWAY_NAMESPACE!r} in mcpGateway namespaces, got {gateway_namespaces}"
+        )
+
+    def test_nemo_mcp_deployment(
+        self,
+        nemo_guardrails_mcp: NemoGuardrails,
+        nemo_guardrails_mcp_route: Route,
+    ) -> None:
+        """
+        Verify MCP-configured NeMo Guardrails server deploys and exposes a route.
+
+        Given: NeMo Guardrails CR with MCP gateway config
+        When: Deployment is created
+        Then: CR and route both exist
+        """
+        assert nemo_guardrails_mcp.exists
+        assert nemo_guardrails_mcp_route.exists
+        assert nemo_guardrails_mcp_route.host is not None
+
+    @pytest.mark.parametrize("endpoint", [CHAT_ENDPOINT, CHECK_ENDPOINT])
+    def test_nemo_mcp_backend_communication(
+        self,
+        openshift_ca_bundle_file: str,
+        current_client_token: str,
+        nemo_guardrails_mcp: NemoGuardrails,
+        nemo_guardrails_mcp_route: Route,
+        nemo_guardrails_mcp_healthcheck,
+        endpoint: str,
+    ) -> None:
+        """
+        Verify the MCP-configured server can serve guardrail requests.
+
+        Given: NeMo Guardrails with MCP gateway configured and auth enabled
+        When: A valid authenticated request is sent
+        Then: Server returns 200 with the expected response shape
+        """
+        url = f"https://{nemo_guardrails_mcp_route.host}{endpoint}"
+        response = send_request(
+            url=url,
+            token=current_client_token,
+            ca_bundle_file=openshift_ca_bundle_file,
+            message=SAFE_PROMPTS[0],
+            model=MODEL_NAME,
+            configuration=None,
+        )
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}"
+        response_json = response.json()
+
+        if endpoint == CHAT_ENDPOINT:
+            assert "choices" in response_json, "Chat endpoint should return choices"
+            assert len(response_json["choices"]) > 0
+        elif endpoint == CHECK_ENDPOINT:
+            assert "status" in response_json, "Check endpoint should return status"
+            assert response_json["status"] in {"blocked", "success"}
+
+    def test_nemo_mcp_envoy_filter_created(
+        self,
+        admin_client: DynamicClient,
+        nemo_guardrails_mcp: NemoGuardrails,
+    ) -> None:
+        """
+        Verify operator creates an EnvoyFilter once the MCPGatewayExtension is present.
+
+        Given: An MCPGatewayExtension exists in the mcp-system namespace and NeMo Guardrails CR references it
+        When: Operator reconciles the CR
+        Then: An EnvoyFilter is created in the mcp-system namespace
+        """
+        envoy_filter = wait_for_envoy_filter(
+            admin_client=admin_client,
+            namespace=MCP_GATEWAY_NAMESPACE,
+            label_selector=f"app={nemo_guardrails_mcp.name}",
+        )
+
+        assert envoy_filter.exists, (
+            f"EnvoyFilter for {nemo_guardrails_mcp.name!r} was not created in {MCP_GATEWAY_NAMESPACE!r}"
+        )
+        spec = envoy_filter.instance.spec
+        assert spec.workloadSelector.labels.get("app") == nemo_guardrails_mcp.name, (
+            f"EnvoyFilter workloadSelector should target app={nemo_guardrails_mcp.name!r}"
+        )
+        assert spec.configPatches, "EnvoyFilter should contain configPatches from the MCPGatewayExtension"

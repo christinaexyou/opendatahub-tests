@@ -15,6 +15,11 @@ MODEL_NAME = LLMdInferenceSimConfig.model_name  # "Qwen2.5-1.5B-Instruct"
 ISVC_NAME = LLMdInferenceSimConfig.isvc_name  # "llm-d-inference-sim-isvc"
 PORT = LLMdInferenceSimConfig.port  # 8032
 
+# Test MCP Gateway configuration
+
+MCP_GATEWAY_NAME = "mcp-gateway"
+MCP_GATEWAY_NAMESPACE = "mcp-system"
+
 
 @dataclass
 class NemoGuardrailsConfig:
@@ -24,6 +29,7 @@ class NemoGuardrailsConfig:
     config_map_name: str
     enable_auth: bool = True
     replicas: int = 1
+    mcp_gateway: list[dict[str, str]] = None
 
 
 # Presidio entity types

@@ -7,8 +7,10 @@ from typing import Any
 import requests
 import structlog
 import yaml
+from kubernetes.dynamic import DynamicClient
 from ocp_resources.config_map import ConfigMap
 from ocp_resources.pod import Pod
+from ocp_resources.resource import NamespacedResource
 from requests import Response
 from timeout_sampler import retry
 
@@ -17,6 +19,13 @@ from tests.ai_safety.nemo_guardrails.constants import (
     OUTPUT_PROMPT_TEMPLATE,
 )
 from utilities.guardrails import get_auth_headers
+
+
+class EnvoyFilter(NamespacedResource):
+    """Istio EnvoyFilter custom resource (networking.istio.io)."""
+
+    api_group: str = "networking.istio.io"
+
 
 LOGGER = structlog.get_logger(name=__name__)
 
@@ -275,6 +284,37 @@ def verify_health_response(response: Response) -> None:
         f"Expected service to be responsive, got {response.status_code}: {response.text[:200]}"
     )
     LOGGER.info(f"Health check passed: {response.status_code} (service is responding)")
+
+
+@retry(exceptions_dict={AssertionError: []}, wait_timeout=120, sleep=5)
+def wait_for_envoy_filter(
+    admin_client: DynamicClient,
+    namespace: str,
+    label_selector: str,
+) -> EnvoyFilter:
+    """
+    Wait for an EnvoyFilter to be created by the TrustyAI operator.
+
+    Args:
+        admin_client: Kubernetes dynamic client
+        namespace: Namespace to search in
+        label_selector: Label selector string to find the EnvoyFilter
+
+    Returns:
+        First matching EnvoyFilter
+
+    Raises:
+        AssertionError: If no EnvoyFilter is found within the timeout
+    """
+    filters = list(
+        EnvoyFilter.get(
+            client=admin_client,
+            namespace=namespace,
+            label_selector=label_selector,
+        )
+    )
+    assert filters, f"No EnvoyFilter found in {namespace!r} with selector {label_selector!r}"
+    return filters[0]
 
 
 @retry(exceptions_dict={AssertionError: []}, wait_timeout=300, sleep=5)
